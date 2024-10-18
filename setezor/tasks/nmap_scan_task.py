@@ -2,28 +2,28 @@ import traceback
 import asyncio
 from time import time
 
-from .base_job import BaseJob, MessageObserver
+from .base_job import BaseJob, MessageObserver, SpyMixin
 from setezor.modules.nmap.scanner import NmapScanner
 from setezor.modules.nmap.parser import NmapParser
 from setezor.tools.ip_tools import get_ipv4, get_mac
 from setezor.database.queries import Queries
 
-from setezor.network_structures import AnyIPAddress, IPv4Struct, PortStruct
-from setezor.modules.nmap.parser import NmapRunResult, NmapStructure
+from setezor.network_structures import AnyIPAddress
+from setezor.modules.nmap.parser import NmapStructure
 
 
-
-class NmapScanTask(BaseJob):
-    
+class NmapScanTask(BaseJob, SpyMixin):
     def __init__(self, agent_id: int, observer: MessageObserver, scheduler, 
                  name: str, task_id: int, command: str, 
                  iface: str, nmap_logs: str, db: Queries):
         super().__init__(agent_id = agent_id, observer = observer, scheduler = scheduler, name = name)
         self.agent_id = agent_id
         self.task_id = task_id
+        self.db = db
         self._coro = self.run(db=db, task_id=task_id, command=command, iface=iface, nmap_logs=nmap_logs)
-    
-    async def _task_func(self, command: str, iface: str, nmap_logs: str, address: AnyIPAddress | dict = {}):
+
+    @classmethod
+    async def _task_func(cls, command: str, iface: str, agent_id: int, nmap_logs: str, address: AnyIPAddress | dict = {}) -> NmapStructure:
         """Запускает активное сканирование с использованием nmap-а
 
         Args:
@@ -37,7 +37,7 @@ class NmapScanTask(BaseJob):
         cmd = ' '.join(command.split(' '))
         cmd += f' -e {iface}'
         scan_result = await NmapScanner().async_run(extra_args=cmd, _password=None, logs_path=nmap_logs)
-        return await loop.run_in_executor(None, NmapParser().parse_hosts, scan_result.get('nmaprun'), self.agent_id, address)
+        return await loop.run_in_executor(None, NmapParser().parse_hosts, scan_result.get('nmaprun'), agent_id, address)
     
     def _write_result_to_db(self, db: Queries, result: NmapStructure):
         """Метод парсинга результатов сканирования nmap-а и занесения в базу
@@ -107,7 +107,7 @@ class NmapScanTask(BaseJob):
         address = {'ip': address.ip, 'mac': address._mac.mac}
         try:
             t1 = time()
-            result = await self._task_func(command=command, iface=iface, nmap_logs=nmap_logs, address=address)
+            result = await self._task_func(command=command, iface=iface, agent_id=self.agent_id, nmap_logs=nmap_logs, address=address)
             self.logger.debug('Task func "%s" finished after %.2f seconds', self.__class__.__name__, time() - t1)
             self._write_result_to_db(db=db, result=result)
             self.logger.debug('Result of task "%s" wrote to db', self.__class__.__name__)

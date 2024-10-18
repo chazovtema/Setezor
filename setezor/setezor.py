@@ -78,9 +78,14 @@ def create_ssl_context():
     return ssl_context
 
 @click.command()
+@click.option('-s', '--spy', default=False, type=bool, is_flag=True, help='Run spy')
 @click.option('-p', '--port', default=16661, type=int, show_default=True, help='Number of port to binding')
-def run_app(port: int):
-    web.run_app(app=create_app(port=port), host=HOST, port=port, 
+def run_app(port: int, spy: bool):
+    if spy:
+        from setezor.spy import run_spy
+        run_spy()
+    else:
+        web.run_app(app=create_app(port=port), host=HOST, port=port, 
                 access_log=get_logger(LoggerNames.web_server, handlers=['file']), 
                 print=print_banner(HOST, port),
                 ssl_context=create_ssl_context())

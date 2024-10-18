@@ -8,6 +8,8 @@ from time import time
 import traceback
 import asyncio
 
+from setezor.modules.nmap.parser import NmapStructure
+
 
 class NmapLogTask(NmapScanTask):
     
@@ -19,7 +21,7 @@ class NmapLogTask(NmapScanTask):
         self._coro = self.run(data=data, task_id=task_id, scanning_ip=scanning_ip, scanning_mac=scanning_mac, nmap_logs=nmap_logs, db=db)
 
     async def _task_func(self, data: str, scanning_ip: str, 
-                         scanning_mac: str, nmap_logs: str, agent_id: int):
+                         scanning_mac: str, nmap_logs: str, agent_id: int) -> NmapStructure:
         """Метод задачи для парсинга xml-логов nmap-а
 
         Args:

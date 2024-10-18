@@ -7,13 +7,28 @@ from subprocess import Popen, PIPE
 from dataclasses import dataclass, field
 from aiojobs._job import Job
 from aiojobs._scheduler import Scheduler
+from pydantic import TypeAdapter
 
+import orjson
+from aiohttp import web
+import aiohttp
+
+
+from setezor.database.queries import Queries
+from setezor.database.models import Agent
+from setezor.app_routes.custom_types import MessageObserver
+from setezor.exceptions.loggers import get_logger, LoggerNames
 try:
-    from app_routes.custom_types import MessageObserver
-    from exceptions.loggers import get_logger, LoggerNames
+    from setezor.database.queries import Queries
+    from setezor.database.models import Agent
+    from setezor.app_routes.custom_types import MessageObserver
+    from setezor.exceptions.loggers import get_logger, LoggerNames
 except ImportError:
     from ..app_routes.custom_types import MessageObserver
     from ..exceptions.loggers import get_logger, LoggerNames
+    from ..database.queries import Queries
+    from ..database.models import Agent
+
 
 @dataclass(slots=True, unsafe_hash=True, frozen=True)
 class SubprocessResult:
@@ -27,8 +42,6 @@ class SubprocessResult:
     
 
 class SubprocessJob(Coroutine):
-    
-    
     def __init__(self, command: list[str], loop: asyncio.BaseEventLoop = None, 
                  executor: ThreadPoolExecutor | ProcessPoolExecutor = ThreadPoolExecutor()) -> None:
         self.command = command
@@ -69,9 +82,83 @@ class SubprocessJob(Coroutine):
     def send(self, __value: Any) -> Any:
         return super().send(__value)
 
-class BaseJob(Job):
+
+def create_adapter(cls: 'SpyMixin') -> TypeAdapter:
+    if 'return' in cls._task_func.__annotations__:
+        adapter = TypeAdapter(cls._task_func.__annotations__['return'])
+        return adapter
+    else:
+        raise RuntimeError('No return type in task function')
+
+
+
+class SpyMixin:
+    db: Queries
+    agent_id: int
+    __adapter__: TypeAdapter
+    spy_computation: bool = False
     
-    def __init__(self, observer: MessageObserver, scheduler, name: str, update_graph: bool = True,agent_id: int | None = None):
+    def __init_subclass__(cls):
+        cls.__adapter__ = create_adapter(cls)
+        from copy import deepcopy
+        func = deepcopy(cls._task_func)
+        def new_task_func(cls: SpyMixin, *args, **kwargs):
+            print(cls._task_func.__annotations__)
+            if cls.spy_computation is True:
+                return func(*args, **kwargs)
+            else:
+                return cls.__make_request(*args, **kwargs)
+        cls._task_func = new_task_func
+
+    @classmethod
+    def __route__(cls) -> web.AbstractRoute:
+        async def handler(request: web.Request) -> web.Response:
+            func_args = orjson.loads(await request.content.read())
+            func_result = await cls._task_func(cls, *func_args['args'], **func_args['kwargs'])
+            return web.Response(
+                body=cls.__adapter__.dump_json(func_result)
+            )
+        return web.post(cls.__url__(), handler)
+    
+    @classmethod
+    def __url__(cls) -> str:
+        return f'/{cls.__name__}'
+    
+    @classmethod
+    def __port__(cls) -> int:
+        return 1337
+        
+    async def __make_request(self, *args, **kwargs):
+        body = orjson.dumps(
+            {
+                'args': args,
+                'kwargs': kwargs
+            },
+            default= lambda obj: obj.model_dump_json()
+        )
+        url = self.__hormat_url(self.__get_agent_ip())
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=body) as response:
+                data = await response.read()
+                if not response.ok:
+                    raise Exception(f'Request failed: {response.status} {response.reason}')
+                function_return = self.__adapter__.validate_json(data)
+                return function_return
+
+    def __hormat_url(self, agent_ip: str) -> str:
+        url = f'http://{agent_ip}:{str(self.__port__())}{self.__url__()}'
+        return url
+        
+    def __get_agent_ip(self) -> str:
+        agent: Agent = self.db.agent.get_by_id(id=self.agent_id)
+        ip = self.db.ip.get_by_id(id=agent.ip_id)
+        string_ip = ip['ip']
+        return string_ip
+
+
+class BaseJob(Job):
+    def __init__(self, observer: MessageObserver, scheduler, name: str, update_graph: bool = True, agent_id: int | None = None):
         super().__init__(None, scheduler)  # FixMe add custom exception handler
         self.agent_id = agent_id
         self.observer = observer
